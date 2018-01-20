@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 
 	"github.com/jammystuff/gocineworld"
 	"github.com/olekukonko/tablewriter"
+	"github.com/sfreiberg/gotwilio"
 
 	"github.com/jammystuff/unliminotify/util"
 	homedir "github.com/mitchellh/go-homedir"
@@ -45,10 +47,16 @@ func init() {
 	// will be global for your application.
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.unliminotify.yaml)")
 
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
 	rootCmd.Flags().IntP("cinema-id", "c", 1, "ID of the cinema to check")
 	viper.BindPFlag("cinema_id", rootCmd.Flags().Lookup("cinema-id"))
+
+	rootCmd.Flags().StringSliceP("sms-numbers", "s", []string{}, "Numbers to send SMS notifications to")
+	viper.BindPFlag("sms_numbers", rootCmd.Flags().Lookup("sms-numbers"))
+
+	rootCmd.Flags().Bool("disable-sms", false, "Disable SMS notification sending")
+	rootCmd.Flags().MarkHidden("disable-sms")
+
+	rootCmd.Flags().BoolP("verbose", "v", false, "Verbose output")
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -103,6 +111,12 @@ func findUnlimitedScreenings(films *[]gocineworld.Film) *[]gocineworld.Film {
 	return &unlimitedScrenings
 }
 
+func getTwilioClient() *gotwilio.Twilio {
+	sid := viper.GetString("twilio_sid")
+	token := viper.GetString("twilio_token")
+	return gotwilio.NewTwilioClient(sid, token)
+}
+
 func printUnlimitedScreenings(films *[]gocineworld.Film) {
 	table := tablewriter.NewWriter(os.Stdout)
 	table.SetHeader([]string{"Title", "Date", "Time"})
@@ -125,7 +139,19 @@ func printUnlimitedScreenings(films *[]gocineworld.Film) {
 }
 
 func runRoot(cmd *cobra.Command, args []string) {
+	verbose, err := cmd.Flags().GetBool("verbose")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Unable to get verbose flag: %v", err)
+	}
+
+	disableSMS, err := cmd.Flags().GetBool("disable-sms")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Unable to get disable SMS flag: %v", err)
+	}
+
 	cinemaID := viper.GetInt("cinema_id")
+	smsFrom := viper.GetString("twilio_from")
+	smsNumbers := viper.GetStringSlice("sms_numbers")
 	listingsXML := util.FetchListingsXML()
 	listings := util.ParseListingsXML(listingsXML)
 
@@ -142,6 +168,54 @@ func runRoot(cmd *cobra.Command, args []string) {
 	unlimitedScrenings := findUnlimitedScreenings(&cinema.Films)
 	fmt.Println("OK")
 
+	if len(smsNumbers) != 0 {
+		sendSMSNotifications(unlimitedScrenings, smsNumbers, smsFrom, disableSMS, verbose)
+	}
+
 	fmt.Print("\n")
 	printUnlimitedScreenings(unlimitedScrenings)
+}
+
+func sendSMSNotifications(films *[]gocineworld.Film, numbers []string, smsFrom string, disableSMS, verbose bool) {
+	fmt.Print("Sending SMS notifications... ")
+	twilio := getTwilioClient()
+	for _, film := range *films {
+		title := film.Title
+		for _, show := range film.Shows {
+			datetime, err := show.Time()
+			if err != nil {
+				fmt.Println("ERROR")
+				fmt.Fprintf(os.Stderr, "Error parsing show time: %v", err)
+				os.Exit(1)
+			}
+			date := datetime.Format(dateFormat)
+			time := datetime.Format(timeFormat)
+			url := show.URL
+			message := fmt.Sprintf("%s on %s @ %s: %s", smsFormatTitle(title), date, time, url)
+			if verbose {
+				fmt.Printf("\n%s\nSending SMS notifications... ", message)
+			}
+			if !disableSMS {
+				for _, number := range numbers {
+					resp, exception, err := twilio.SendSMS(smsFrom, number, message, "", "")
+					if verbose {
+						fmt.Printf("\nSMS response: %v\n", resp)
+						fmt.Printf("\nSMS exception: %v\n", exception)
+						fmt.Printf("\nSMS error: %v\n", err)
+						fmt.Print("Sending SMS notifications...")
+					}
+					if exception != nil || err != nil {
+						fmt.Println("ERROR")
+						fmt.Fprintf(os.Stderr, "Error sending SMS notifications: %v %v", exception, err)
+						os.Exit(1)
+					}
+				}
+			}
+		}
+	}
+	fmt.Println("OK")
+}
+
+func smsFormatTitle(title string) string {
+	return strings.Replace(title, " : Unlimited Screening", "", 1)
 }
