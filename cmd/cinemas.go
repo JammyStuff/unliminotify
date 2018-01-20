@@ -16,7 +16,7 @@ var cinemasCmd = &cobra.Command{
 	Use:   "cinemas",
 	Short: "List cinemas",
 	Long:  `List the available cinemas`,
-	Run:   run,
+	Run:   runCinemas,
 }
 
 func init() {
@@ -46,7 +46,7 @@ func printCinemas(listings gocineworld.Listings) {
 	table.Render()
 }
 
-func run(cmd *cobra.Command, args []string) {
+func runCinemas(cmd *cobra.Command, args []string) {
 	listingsXML := util.FetchListingsXML()
 	listings := util.ParseListingsXML(listingsXML)
 	fmt.Print("\n")
