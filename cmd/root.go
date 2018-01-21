@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
 	"regexp"
 	"strings"
@@ -47,6 +48,9 @@ func init() {
 	// will be global for your application.
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.unliminotify.yaml)")
 
+	rootCmd.Flags().StringP("notifications-file", "f", "/var/db/unliminotify/notifications", "Path to the notifications file")
+	viper.BindPFlag("notifications_file", rootCmd.Flags().Lookup("notifications-file"))
+
 	rootCmd.Flags().IntP("cinema-id", "c", 1, "ID of the cinema to check")
 	viper.BindPFlag("cinema_id", rootCmd.Flags().Lookup("cinema-id"))
 
@@ -83,6 +87,35 @@ func initConfig() {
 	if err := viper.ReadInConfig(); err == nil {
 		fmt.Println("Using config file:", viper.ConfigFileUsed())
 	}
+}
+
+func filterNewUnlimitedScreenings(films *[]gocineworld.Film) *[]gocineworld.Film {
+	fmt.Print("Filtering out old Unlimited screenings... ")
+	path := viper.GetString("notifications_file")
+	rawFile, err := ioutil.ReadFile(path)
+	if err != nil {
+		rawFile = []byte{}
+	}
+	urls := strings.Split(string(rawFile), "\n")
+
+	newScreenings := make([]gocineworld.Film, 0)
+	for _, film := range *films {
+		for _, show := range film.Shows {
+			found := false
+			for _, url := range urls {
+				if show.URL == url {
+					found = true
+					break
+				}
+			}
+			if !found {
+				newScreenings = append(newScreenings, film)
+				break
+			}
+		}
+	}
+	fmt.Println("OK")
+	return &newScreenings
 }
 
 func findCinema(id int, listings *gocineworld.Listings) *gocineworld.Cinema {
@@ -168,9 +201,11 @@ func runRoot(cmd *cobra.Command, args []string) {
 	unlimitedScrenings := findUnlimitedScreenings(&cinema.Films)
 	fmt.Println("OK")
 
+	newScreenings := filterNewUnlimitedScreenings(unlimitedScrenings)
 	if len(smsNumbers) != 0 {
-		sendSMSNotifications(unlimitedScrenings, smsNumbers, smsFrom, disableSMS, verbose)
+		sendSMSNotifications(newScreenings, smsNumbers, smsFrom, disableSMS, verbose)
 	}
+	writeNotificationsFile(newScreenings)
 
 	fmt.Print("\n")
 	printUnlimitedScreenings(unlimitedScrenings)
@@ -218,4 +253,27 @@ func sendSMSNotifications(films *[]gocineworld.Film, numbers []string, smsFrom s
 
 func smsFormatTitle(title string) string {
 	return strings.Replace(title, " : Unlimited Screening", "", 1)
+}
+
+func writeNotificationsFile(films *[]gocineworld.Film) {
+	fmt.Print("Writing notifications file... ")
+	path := viper.GetString("notifications_file")
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	if err != nil {
+		fmt.Println("ERROR")
+		fmt.Fprintf(os.Stderr, "Unable to open notifications file: %v", err)
+		os.Exit(1)
+	}
+	defer file.Close()
+	for _, film := range *films {
+		for _, show := range film.Shows {
+			_, err := fmt.Fprintln(file, show.URL)
+			if err != nil {
+				fmt.Println("ERROR")
+				fmt.Fprintf(os.Stderr, "Unable to write to notifications file: %v", err)
+				os.Exit(1)
+			}
+		}
+	}
+	fmt.Println("OK")
 }
